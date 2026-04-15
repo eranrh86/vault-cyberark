@@ -1,35 +1,26 @@
 # =============================================================================
-# CyberArk Vault — Process CPU & Memory Metrics Collector
+# CyberArk Vault — Process Custom Metrics via DogStatsD
 # =============================================================================
-# Monitors key CyberArk Vault processes and sends metrics to Datadog
-# every 15 seconds via DogStatsD (UDP 8125).
+# Reads real Windows Performance Counter values for CyberArk Vault processes
+# and sends CPU % and Memory (bytes) to Datadog every 15 seconds.
 #
 # Processes monitored:
-#   dbmain.exe      — CyberArk Vault database main process
+#   dbmain.exe       — CyberArk Vault database main process
 #   BLServiceApp.exe — CyberArk Business Logic service
-#   ENE.exe         — CyberArk Event Notification Engine
+#   ENE.exe          — CyberArk Event Notification Engine
 #
-# Metrics emitted (tagged with process_name:<name>):
+# Custom metrics (tagged process_name:<name>):
 #   vault.process.cpu_pct       — CPU usage %
 #   vault.process.memory_bytes  — Working Set memory in bytes
-#   vault.process.running       — 1 = running, 0 = down
-#
-# Requirements:
-#   - PowerShell 5.1+ (built into Windows Server 2016+)
-#   - Datadog Agent running on same server (DogStatsD port 8125)
 # =============================================================================
 
-# --- CONFIGURE THESE ---------------------------------------------------------
 $tags     = "env:demo,app:cyberark-vault,host:Vault,collector:powershell"
-$interval = 15           # seconds between collections
-$statsd   = "127.0.0.1"  # DogStatsD host
-$port     = 8125          # DogStatsD port
-# -----------------------------------------------------------------------------
+$interval = 15
+$statsd   = "127.0.0.1"
+$port     = 8125
 
-# CyberArk Vault processes to monitor (without .exe)
 $targetProcesses = @("dbmain", "BLServiceApp", "ENE")
 
-# Register Event Log source for error reporting
 try {
     if (-not [System.Diagnostics.EventLog]::SourceExists("DD-VaultMetrics")) {
         New-EventLog -LogName Application -Source "DD-VaultMetrics"
@@ -46,73 +37,50 @@ function Send-Gauge {
         $bytes   = [System.Text.Encoding]::UTF8.GetBytes($payload)
         $udp.Send($bytes, $bytes.Length) | Out-Null
         $udp.Close()
-    } catch {
-        Write-EventLog -LogName Application -Source "DD-VaultMetrics" -EventId 1001 `
-            -EntryType Warning -Message "Send-Gauge error [${metric}]: $_" `
-            -ErrorAction SilentlyContinue
-    }
+    } catch {}
 }
 
 
-function Read-ProcessMetrics {
+function Get-ProcessMetrics {
     param([string]$processName)
-
     $cpuTotal = 0.0
     $memTotal = 0.0
     $found    = 0
 
-    # Handle multiple instances: processName, processName#1 ... processName#9
     $candidates = @($processName) + (1..9 | ForEach-Object { "$processName#$_" })
-
     foreach ($inst in $candidates) {
         try {
-            $cpuCounter = New-Object System.Diagnostics.PerformanceCounter("Process", "% Processor Time", $inst, $true)
-            $memCounter = New-Object System.Diagnostics.PerformanceCounter("Process", "Working Set",       $inst, $true)
-
-            $cpuCounter.NextValue() | Out-Null  # discard first (always 0)
-            $memCounter.NextValue() | Out-Null
+            $cpu = New-Object System.Diagnostics.PerformanceCounter("Process", "% Processor Time", $inst, $true)
+            $mem = New-Object System.Diagnostics.PerformanceCounter("Process", "Working Set",       $inst, $true)
+            $cpu.NextValue() | Out-Null
+            $mem.NextValue() | Out-Null
             Start-Sleep -Milliseconds 100
-
-            $cpu = $cpuCounter.NextValue()
-            $mem = $memCounter.NextValue()
-
-            $cpuCounter.Close(); $cpuCounter.Dispose()
-            $memCounter.Close(); $memCounter.Dispose()
-
-            $cpuTotal += $cpu
-            $memTotal += $mem
+            $cpuVal = $cpu.NextValue()
+            $memVal = $mem.NextValue()
+            $cpu.Close(); $cpu.Dispose()
+            $mem.Close(); $mem.Dispose()
+            $cpuTotal += $cpuVal
+            $memTotal += $memVal
             $found++
-        } catch {
-            # Instance doesn't exist — skip
-        }
+        } catch {}
     }
-
-    return @{
-        cpu     = $cpuTotal
-        mem     = $memTotal
-        running = if ($found -gt 0) { 1 } else { 0 }
-    }
+    return @{ cpu = $cpuTotal; mem = $memTotal; found = $found }
 }
 
 
-Write-Host "CyberArk Vault metrics collector starting"
-Write-Host "Processes: $($targetProcesses -join ', ')"
-Write-Host "Sending to ${statsd}:${port} every ${interval}s"
+Write-Host "CyberArk Vault metrics collector starting — $(Get-Date)"
+Write-Host "Monitoring: $($targetProcesses -join ', ')"
 
 while ($true) {
+    foreach ($proc in $targetProcesses) {
+        $r        = Get-ProcessMetrics -processName $proc
+        $procTags = "$tags,process_name:$proc"
 
-    foreach ($procName in $targetProcesses) {
-        $result   = Read-ProcessMetrics -processName $procName
-        $procTags = "$tags,process_name:$procName"
+        Send-Gauge -metric "vault.process.cpu_pct"      -value ([double]$r.cpu) -tags $procTags
+        Send-Gauge -metric "vault.process.memory_bytes" -value ([double]$r.mem) -tags $procTags
 
-        # Always send all 3 metrics — 0 when process is not running
-        Send-Gauge -metric "vault.process.cpu_pct"      -value ([double]$result.cpu)     -tags $procTags
-        Send-Gauge -metric "vault.process.memory_bytes" -value ([double]$result.mem)     -tags $procTags
-        Send-Gauge -metric "vault.process.running"      -value ([double]$result.running) -tags $procTags
-
-        $status = if ($result.running -eq 1) { "UP" } else { "DOWN" }
-        Write-Host "$(Get-Date -Format 'HH:mm:ss') | $procName | $status | cpu=$([math]::Round($result.cpu,1))% | mem=$([math]::Round($result.mem/1MB,1))MB"
+        $status = if ($r.found -gt 0) { "UP" } else { "DOWN" }
+        Write-Host "$(Get-Date -Format 'HH:mm:ss') | $proc | $status | cpu=$([math]::Round($r.cpu,1))% | mem=$([math]::Round($r.mem/1MB,1))MB"
     }
-
     Start-Sleep -Seconds $interval
 }
