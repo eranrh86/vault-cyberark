@@ -1,17 +1,10 @@
 # =============================================================================
 # CyberArk Vault — Process Custom Metrics via DogStatsD
 # =============================================================================
-# Reads real Windows Performance Counter values for CyberArk Vault processes
-# and sends CPU % and Memory (bytes) to Datadog every 15 seconds.
-#
-# Processes monitored:
-#   dbmain.exe       — CyberArk Vault database main process
-#   BLServiceApp.exe — CyberArk Business Logic service
-#   ENE.exe          — CyberArk Event Notification Engine
-#
-# Custom metrics (tagged process_name:<name>):
-#   vault.process.cpu_pct       — CPU usage %
-#   vault.process.memory_bytes  — Working Set memory in bytes
+# Metrics emitted per process (no process_name tag needed — name is in metric):
+#   vault.dbmain.cpu_pct           vault.dbmain.memory_bytes
+#   vault.blserviceapp.cpu_pct     vault.blserviceapp.memory_bytes
+#   vault.ene.cpu_pct              vault.ene.memory_bytes
 # =============================================================================
 
 $tags     = "env:demo,app:cyberark-vault,host:Vault,collector:powershell"
@@ -19,7 +12,12 @@ $interval = 15
 $statsd   = "127.0.0.1"
 $port     = 8125
 
-$targetProcesses = @("dbmain", "BLServiceApp", "ENE")
+# Map process name -> metric prefix (lowercase, no special chars)
+$targetProcesses = @{
+    "dbmain"       = "vault.dbmain"
+    "BLServiceApp" = "vault.blserviceapp"
+    "ENE"          = "vault.ene"
+}
 
 try {
     if (-not [System.Diagnostics.EventLog]::SourceExists("DD-VaultMetrics")) {
@@ -69,18 +67,19 @@ function Get-ProcessMetrics {
 
 
 Write-Host "CyberArk Vault metrics collector starting — $(Get-Date)"
-Write-Host "Monitoring: $($targetProcesses -join ', ')"
 
 while ($true) {
-    foreach ($proc in $targetProcesses) {
-        $r        = Get-ProcessMetrics -processName $proc
-        $procTags = "$tags,process_name:$proc"
+    foreach ($proc in $targetProcesses.GetEnumerator()) {
+        $procName   = $proc.Key
+        $metricBase = $proc.Value
+        $r          = Get-ProcessMetrics -processName $procName
 
-        Send-Gauge -metric "vault.process.cpu_pct"      -value ([double]$r.cpu) -tags $procTags
-        Send-Gauge -metric "vault.process.memory_bytes" -value ([double]$r.mem) -tags $procTags
+        # Metric name carries the process identity — no process_name tag needed
+        Send-Gauge -metric "$metricBase.cpu_pct"      -value ([double]$r.cpu) -tags $tags
+        Send-Gauge -metric "$metricBase.memory_bytes" -value ([double]$r.mem) -tags $tags
 
         $status = if ($r.found -gt 0) { "UP" } else { "DOWN" }
-        Write-Host "$(Get-Date -Format 'HH:mm:ss') | $proc | $status | cpu=$([math]::Round($r.cpu,1))% | mem=$([math]::Round($r.mem/1MB,1))MB"
+        Write-Host "$(Get-Date -Format 'HH:mm:ss') | $procName | $status | cpu=$([math]::Round($r.cpu,1))% | mem=$([math]::Round($r.mem/1MB,1))MB"
     }
     Start-Sleep -Seconds $interval
 }
