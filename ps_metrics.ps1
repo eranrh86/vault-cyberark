@@ -1,7 +1,7 @@
 # =============================================================================
-# CyberArk Vault — Process Custom Metrics via DogStatsD
+# CyberArk Vault - Process Custom Metrics via DogStatsD
 # =============================================================================
-# Metrics emitted per process (no process_name tag needed — name is in metric):
+# Metrics emitted per process (no process_name tag needed - name is in metric):
 #   vault.dbmain.cpu_pct           vault.dbmain.memory_bytes
 #   vault.blserviceapp.cpu_pct     vault.blserviceapp.memory_bytes
 #   vault.ene.cpu_pct              vault.ene.memory_bytes
@@ -36,7 +36,7 @@ function Send-Gauge {
     try {
         $udp     = New-Object System.Net.Sockets.UdpClient
         $udp.Connect($statsd, $port)
-        # No tags in payload — tags are managed via datadog.yaml on the host
+        # No tags in payload - tags are managed via datadog.yaml on the host
         $payload = "${metric}:${value}|g"
         $bytes   = [System.Text.Encoding]::UTF8.GetBytes($payload)
         $udp.Send($bytes, $bytes.Length) | Out-Null
@@ -72,7 +72,7 @@ function Get-ProcessMetrics {
 }
 
 
-Write-Host "CyberArk Vault metrics collector starting — $(Get-Date)"
+Write-Host "CyberArk Vault metrics collector starting - $(Get-Date)"
 
 while ($true) {
     foreach ($proc in $targetProcesses.GetEnumerator()) {
@@ -80,7 +80,7 @@ while ($true) {
         $metricBase = $proc.Value
         $r          = Get-ProcessMetrics -processName $procName
 
-        # Metric name carries the process identity — no process_name tag needed
+        # Metric name carries the process identity - no process_name tag needed
         Send-Gauge -metric "$metricBase.cpu_pct"      -value ([double]$r.cpu)
         Send-Gauge -metric "$metricBase.memory_bytes" -value ([double]$r.mem)
 
