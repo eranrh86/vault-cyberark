@@ -7,7 +7,12 @@
 #   vault.ene.cpu_pct              vault.ene.memory_bytes
 # =============================================================================
 
-$tags     = "env:demo,app:cyberark-vault,host:Vault,collector:powershell"
+# Tags are intentionally left empty here.
+# Add tags via the Datadog Agent datadog.yaml file instead:
+#   tags:
+#     - env:production
+#     - app:cyberark-vault
+#     - team:security
 $interval = 15
 $statsd   = "127.0.0.1"
 $port     = 8125
@@ -27,11 +32,12 @@ try {
 
 
 function Send-Gauge {
-    param([string]$metric, [double]$value, [string]$tags)
+    param([string]$metric, [double]$value)
     try {
         $udp     = New-Object System.Net.Sockets.UdpClient
         $udp.Connect($statsd, $port)
-        $payload = "${metric}:${value}|g|#${tags}"
+        # No tags in payload — tags are managed via datadog.yaml on the host
+        $payload = "${metric}:${value}|g"
         $bytes   = [System.Text.Encoding]::UTF8.GetBytes($payload)
         $udp.Send($bytes, $bytes.Length) | Out-Null
         $udp.Close()
@@ -75,8 +81,8 @@ while ($true) {
         $r          = Get-ProcessMetrics -processName $procName
 
         # Metric name carries the process identity — no process_name tag needed
-        Send-Gauge -metric "$metricBase.cpu_pct"      -value ([double]$r.cpu) -tags $tags
-        Send-Gauge -metric "$metricBase.memory_bytes" -value ([double]$r.mem) -tags $tags
+        Send-Gauge -metric "$metricBase.cpu_pct"      -value ([double]$r.cpu)
+        Send-Gauge -metric "$metricBase.memory_bytes" -value ([double]$r.mem)
 
         $status = if ($r.found -gt 0) { "UP" } else { "DOWN" }
         Write-Host "$(Get-Date -Format 'HH:mm:ss') | $procName | $status | cpu=$([math]::Round($r.cpu,1))% | mem=$([math]::Round($r.mem/1MB,1))MB"
