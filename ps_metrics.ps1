@@ -14,26 +14,15 @@
 #   vault.blserviceapp.cpu_pct     vault.blserviceapp.memory_bytes
 #   vault.ene.cpu_pct              vault.ene.memory_bytes
 #
-# Tags:
-#   Configure tags in C:\ProgramData\Datadog\datadog.yaml:
-#     tags:
-#       - env:production
-#       - app:cyberark-vault
-#       - team:security
-#
-# Requirements:
-#   - PowerShell 5.1 or later (built into Windows Server 2016+)
-#   - Datadog Agent installed and running on the same server
-#
-# Installation:
-#   See README.md
+# Tags: read automatically from C:\ProgramData\Datadog\datadog.yaml
+#   Add tags there and restart this script - no code change needed.
 # =============================================================================
 
-$interval = 15           # seconds between collections
-$statsd   = "127.0.0.1"  # Datadog Agent DogStatsD host (localhost)
-$port     = 8125          # Datadog Agent DogStatsD port
+$interval  = 15
+$statsd    = "127.0.0.1"
+$port      = 8125
+$yamlPath  = "C:\ProgramData\Datadog\datadog.yaml"
 
-# CyberArk Vault processes to monitor (map: process name -> metric prefix)
 $targetProcesses = @{
     "dbmain"       = "vault.dbmain"
     "BLServiceApp" = "vault.blserviceapp"
@@ -47,12 +36,34 @@ try {
 } catch {}
 
 
+# Read tags from datadog.yaml tags: block
+function Get-AgentTags {
+    $tags = @()
+    if (-not (Test-Path $yamlPath)) { return "" }
+    $inTagsBlock = $false
+    foreach ($line in Get-Content $yamlPath) {
+        if ($line -match '^tags\s*:') {
+            $inTagsBlock = $true
+            continue
+        }
+        if ($inTagsBlock) {
+            if ($line -match '^\s+-\s*(.+)') {
+                $tags += $matches[1].Trim()
+            } elseif ($line -match '^\S') {
+                break
+            }
+        }
+    }
+    return ($tags -join ',')
+}
+
+
 function Send-Gauge {
-    param([string]$metric, [double]$value)
+    param([string]$metric, [double]$value, [string]$tags)
     try {
-        $udp     = New-Object System.Net.Sockets.UdpClient
+        $udp  = New-Object System.Net.Sockets.UdpClient
         $udp.Connect($statsd, $port)
-        $payload = "${metric}:${value}|g"
+        $payload = if ($tags) { "${metric}:${value}|g|#${tags}" } else { "${metric}:${value}|g" }
         $bytes   = [System.Text.Encoding]::UTF8.GetBytes($payload)
         $udp.Send($bytes, $bytes.Length) | Out-Null
         $udp.Close()
@@ -69,8 +80,6 @@ function Get-ProcessMetrics {
     $cpuTotal = 0.0
     $memTotal = 0.0
     $found    = 0
-
-    # Handle multiple instances of the same process: proc, proc#1, proc#2 ...
     $candidates = @($processName) + (1..9 | ForEach-Object { "$processName#$_" })
     foreach ($inst in $candidates) {
         try {
@@ -95,14 +104,25 @@ function Get-ProcessMetrics {
 Write-Host "CyberArk Vault metrics collector starting - $(Get-Date)"
 Write-Host "Sending to ${statsd}:${port} every ${interval}s"
 
+# Re-read tags from yaml every 5 minutes in case they change
+$tagRefreshCounter = 0
+$currentTags = Get-AgentTags
+Write-Host "Tags from datadog.yaml: $(if($currentTags){'['+$currentTags+']'}else{'(none)'})"
+
 while ($true) {
+    # Refresh tags every 20 loops (~5 min)
+    if ($tagRefreshCounter % 20 -eq 0) {
+        $currentTags = Get-AgentTags
+    }
+    $tagRefreshCounter++
+
     foreach ($proc in $targetProcesses.GetEnumerator()) {
         $procName   = $proc.Key
         $metricBase = $proc.Value
         $r          = Get-ProcessMetrics -processName $procName
 
-        Send-Gauge -metric "$metricBase.cpu_pct"      -value ([double]$r.cpu)
-        Send-Gauge -metric "$metricBase.memory_bytes" -value ([double]$r.mem)
+        Send-Gauge -metric "$metricBase.cpu_pct"      -value ([double]$r.cpu) -tags $currentTags
+        Send-Gauge -metric "$metricBase.memory_bytes" -value ([double]$r.mem) -tags $currentTags
 
         $status = if ($r.found -gt 0) { "UP" } else { "DOWN" }
         Write-Host "$(Get-Date -Format 'HH:mm:ss') | $procName | $status | cpu=$([math]::Round($r.cpu,1))% | mem=$([math]::Round($r.mem/1MB,1))MB"
